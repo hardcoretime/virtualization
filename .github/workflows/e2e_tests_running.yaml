@@ -1,0 +1,99 @@
+name: E2E tests
+
+env:
+  CI_COMMIT_REF_NAME: ${{ github.ref_name }}
+  GO_VERSION: "1.22.7"
+  GINKGO_VERSION: "2.20.0"
+
+# on:
+#   schedule:
+#     - cron: 55 08 * * *
+
+on:
+  push:
+    branches:
+      - main
+
+defaults:
+  run:
+    shell: bash
+  
+jobs:
+  e2e_run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Add API host to /etc/hosts
+        run: |
+          sudo echo "95.143.190.25 api.rs.virtlab.flant.com" | sudo tee -a /etc/hosts > /dev/null
+          sudo echo "95.143.190.25 dex.rs.virtlab.flant.com" | sudo tee -a /etc/hosts > /dev/null
+      - name: Set up Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: "${{ env.GO_VERSION }}"
+      - name: Set up Task
+        uses: arduino/setup-task@v2
+      - name: Add custom CA certificate
+        env:
+          K8S_CA_CERT: ${{ secrets.K8S_CA_CERT }}
+        run: |
+          echo "$K8S_CA_CERT" > ca.crt
+          sudo cp ca.crt /usr/local/share/ca-certificates/custom-ca.crt
+          sudo update-ca-certificates
+      # - name: Set k8s cluster context
+      #   uses: azure/k8s-set-context@v4
+      #   with:
+      #     method: service-account
+      #     k8s-url: https://api.rs.virtlab.flant.com
+      #     k8s-secret: ${{ secrets.E2E_VIRTUALIZATION_SA_SECRET }}
+      - name: Set context
+        uses: azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+          context: admin-api.rs.virtlab.flant.com
+      # - name: Set up kubeconfig
+      #   env:
+      #     KUBE_CONFIG_BASE64_DATA: ${{ secrets.KUBE_CONFIG_BASE64_DATA }}
+      #     TEST_ENV: ${{ secrets.TEST_ENV }}
+      #     TESTENV: ${{ testenv.TESTENV }}
+      #   run: |
+      #     echo $TESTENV
+      #     # echo $TEST_ENV | base64 -d
+      #     mkdir -p "$HOME/.kube"
+      #     echo "$KUBE_CONFIG_BASE64_DATA" | base64 -d > "$HOME/.kube/config"
+      #     kubectl config view --kubeconfig="$HOME/.kube/config"
+      #   # kubectl get module config virtualization --kubeconfig=$KUBECONFIG
+      #   # kubectl get module config virtualization
+      - name: Copy testdata
+        working-directory: ./tests/e2e
+        run: |
+          rm -fr /tmp/testdata
+          mkdir /tmp/testdata
+          cp -a testdata/complex-test /tmp/testdata/complex-test
+          cp -a testdata/connectivity /tmp/testdata/connectivity
+          cp -a testdata/disk-resizing /tmp/testdata/disk-resizing
+          cp -a testdata/sizing-policy /tmp/testdata/sizing-policy
+          cp -a testdata/vm-configuration /tmp/testdata/vm-configuration
+          cp -a testdata/vm-migration /tmp/testdata/vm-migration
+          cp -a testdata/vm-disk-attachment /tmp/testdata/vm-disk-attachment
+          cp -a testdata/sshkeys /tmp/testdata/sshkeys
+      - name: Set up Deckhouse-cli
+        run: |
+          curl -fsSL -o d8-install.sh https://raw.githubusercontent.com/deckhouse/deckhouse-cli/main/d8-install.sh
+          bash d8-install.sh
+      - name: Install Ginkgo
+        run: |
+          export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin"
+          go install github.com/onsi/ginkgo/v2/ginkgo@v$GINKGO_VERSION
+      - name: Go packages
+        working-directory: ./tests/e2e/
+        run: |
+          go mod download
+      - name: Run tests
+        working-directory: ./tests/e2e/
+        run: |
+          ls -la $KUBECONFIG
+          kubectl get moduleconfig virtualization
+          ginkgo --skip-file vm_test.go --skip-file vm_label_annotation_test.go --skip-file ipam_test.go --skip-file disks_test.go -v
